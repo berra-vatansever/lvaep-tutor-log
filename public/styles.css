@@ -271,3 +271,13 @@ table.grid tr.total td { font-weight: 700; border-top: 2px solid var(--ink); }
   .card, .table-wrap, .paper { border-color: #000; box-shadow: none; }
   table.grid td.has { background: #eee; }
 }
+
+/* account + sign-in */
+.top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.account { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.acct-email { font-size: .8rem; color: var(--ink-3); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auth-wrap { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 32px; align-items: center; padding-block: 24px; }
+@media (max-width: 760px) { .auth-wrap { grid-template-columns: 1fr; gap: 20px; padding-block: 0; } }
+.auth-wrap h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); }
+.auth-card { max-width: 480px; }
+@media (max-width: 520px) { .acct-email { display: none; } }

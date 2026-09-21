@@ -19,14 +19,17 @@
       <div class="brand-sub">Literacy Volunteers of America · Essex/Passaic</div>
     </div>
   </div>
-  <nav class="role-switch" aria-label="Choose view">
-    <button type="button" id="role-tutor" data-role="tutor">Tutor</button>
-    <button type="button" id="role-staff" data-role="staff">Staff</button>
-  </nav>
+  <div class="top-right">
+    <nav class="role-switch" aria-label="Choose view" hidden>
+      <button type="button" id="role-tutor" data-role="tutor">Tutor view</button>
+      <button type="button" id="role-staff" data-role="staff">Staff</button>
+    </nav>
+    <div id="account" class="account" hidden></div>
+  </div>
 </header>
 
 <main id="app" class="wrap">
-  <p class="loading">Loading program data…</p>
+  <p class="loading">Loading…</p>
 </main>
 
 <dialog id="goals-dialog" class="dialog"></dialog>

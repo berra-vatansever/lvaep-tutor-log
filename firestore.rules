@@ -1,29 +1,63 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
+    // Every data rule requires a signed-in account with a verified email.
+    function signedIn() { return request.auth != null && request.auth.token.email_verified == true; }
+    function me() { return request.auth.token.email.lower(); }
+    function isStaff() { return signedIn() && exists(/databases/$(db)/documents/staff/$(me())); }
     function str(v, max) { return v is string && v.size() <= max; }
+    function named(d) { return str(d.name, 80) && d.name.size() > 0; }
 
-    match /tutors/{id} {
-      allow read, delete: if true;
-      allow create, update: if str(request.resource.data.name, 80) && request.resource.data.name.size() > 0;
+    // Staff accounts, keyed by lowercase email.
+    match /staff/{email} {
+      allow get: if signedIn() && (email == me() || isStaff());
+      allow list, create, update: if isStaff() && email == email.lower();
+      allow delete: if isStaff() && email != me();
     }
+
+    // Tutors, keyed by lowercase email so a tutor's sign-in identifies them.
+    match /tutors/{email} {
+      allow get: if signedIn() && (email == me() || isStaff());
+      allow list, delete: if isStaff();
+      allow create, update: if isStaff() && email == email.lower() && named(request.resource.data);
+    }
+
+    // Student records are staff-only; tutors see names via their assignments.
     match /students/{id} {
-      allow read, delete: if true;
-      allow create, update: if str(request.resource.data.name, 80) && request.resource.data.name.size() > 0;
+      allow read, delete: if isStaff();
+      allow create, update: if isStaff() && named(request.resource.data);
     }
+
+    // Tutor–student assignments. Tutors may only record goals / stopped status on their own.
     match /pairs/{id} {
-      allow read, delete: if true;
-      allow create, update: if request.resource.data.tutorId is string && request.resource.data.studentId is string
-        && request.resource.data.size() < 30;
+      allow read: if isStaff() || (signedIn() && resource.data.tutorId == me());
+      allow create, delete: if isStaff();
+      allow update: if isStaff() || (signedIn() && resource.data.tutorId == me()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['goals', 'otherGoal', 'otherGoalDate', 'stopped', 'stoppedReason', 'stoppedDate']));
     }
+
+    function validSession(d) {
+      return d.pairId is string && d.tutorId is string && d.studentId is string
+        && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.hours is number && d.hours >= 0 && d.hours <= 12
+        && d.status in ['held', 'SA', 'TA', 'H']
+        && (!('note' in d) || str(d.note, 500));
+    }
+    // A session must belong to a real assignment, with matching tutor and student.
+    function matchesPair(d) {
+      let p = get(/databases/$(db)/documents/pairs/$(d.pairId)).data;
+      return p.tutorId == d.tutorId && p.studentId == d.studentId;
+    }
+
     match /sessions/{id} {
-      allow read, delete: if true;
-      allow create, update: if request.resource.data.pairId is string
-        && request.resource.data.date is string && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
-        && request.resource.data.hours is number && request.resource.data.hours >= 0 && request.resource.data.hours <= 12
-        && request.resource.data.status in ['held', 'SA', 'TA', 'H']
-        && (!('note' in request.resource.data) || str(request.resource.data.note, 500));
+      allow read, delete: if isStaff() || (signedIn() && resource.data.tutorId == me());
+      allow create: if validSession(request.resource.data) && matchesPair(request.resource.data)
+        && (isStaff() || (signedIn() && request.resource.data.tutorId == me()));
+      allow update: if validSession(request.resource.data) && matchesPair(request.resource.data)
+        && (isStaff() || (signedIn() && resource.data.tutorId == me() && request.resource.data.tutorId == me()));
     }
-    match /meta/{id} { allow read, write: if true; }
+
+    match /meta/{id} { allow read, write: if isStaff(); }
   }
 }

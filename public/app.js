@@ -1,8 +1,12 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc,
-  getDoc, writeBatch, serverTimestamp,
+  getDoc, writeBatch, serverTimestamp, query, where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+  sendEmailVerification, sendPasswordResetEmail, signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const fb = initializeApp({
   apiKey: "AIzaSyCTFqIkSB7SLUePFYadm8wXBHos_OZiaHg",
@@ -13,9 +17,7 @@ const fb = initializeApp({
   appId: "1:436837582068:web:1b0bfac56a48f967608aa1",
 });
 const db = getFirestore(fb);
-
-// Staff passcode: a light gate so tutors land on their own view. Change it here.
-const STAFF_CODE = "lvaep2026";
+const auth = getAuth(fb);
 
 // ---- Goals, exactly as on the paper form ----
 const GOALS = [
@@ -47,11 +49,12 @@ const store = {
   set(k, v) { try { localStorage.setItem("lvaep." + k, v); } catch { /* storage unavailable */ } },
 };
 const S = {
-  tutors: new Map(), students: new Map(), pairs: new Map(), sessions: new Map(),
-  loaded: { tutors: false, students: false, pairs: false, sessions: false },
-  role: store.get("role") || "tutor",
-  tutorId: store.get("tutorId") || "",
-  staffOk: sessionGet("staffOk") === "1",
+  tutors: new Map(), students: new Map(), pairs: new Map(), sessions: new Map(), staff: new Map(),
+  loaded: {},
+  // account: loading | signedOut | unverified | unregistered | ready
+  account: "loading", user: null, email: "", isStaff: false, authMode: "signin",
+  role: "tutor",
+  tutorId: "",
   staffTab: store.get("staffTab") || "report",
   month: todayISO().slice(0, 7),
   formPairId: "",
@@ -61,8 +64,6 @@ const S = {
 };
 
 // ---- Utilities ----
-function sessionGet(k) { try { return sessionStorage.getItem("lvaep." + k); } catch { return null; } }
-function sessionSet(k, v) { try { sessionStorage.setItem("lvaep." + k, v); } catch { /* ignore */ } }
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -88,7 +89,9 @@ function byName(a, b) { return (a.name || "").localeCompare(b.name || ""); }
 function addDays(iso, n) { const [y, m, d] = iso.split("-").map(Number); const t = new Date(y, m - 1, d + n); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; }
 
 function tutorName(id) { return S.tutors.get(id)?.name || "Unknown tutor"; }
-function studentName(id) { return S.students.get(id)?.name || "Unknown student"; }
+function studentName(id) {
+  return S.students.get(id)?.name || [...S.pairs.values()].find((p) => p.studentId === id)?.studentName || "Unknown student";
+}
 function pairLabel(p) { return `${tutorName(p.tutorId)} → ${studentName(p.studentId)}`; }
 function pairsForTutor(tid) { return [...S.pairs.values()].filter((p) => p.tutorId === tid).sort((a, b) => studentName(a.studentId).localeCompare(studentName(b.studentId))); }
 // Newest first; within a day, most recently entered first (a pending write has no timestamp yet, so it counts as newest).
@@ -126,12 +129,21 @@ function goalsInMonth(p, ym) {
 // ---- Render root ----
 const app = document.getElementById("app");
 function render() {
+  document.querySelector(".role-switch").hidden = !(S.account === "ready" && S.isStaff);
   document.querySelectorAll(".role-switch button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.role === S.role)));
-  if (!Object.values(S.loaded).every(Boolean)) return;
+  const acct = document.getElementById("account");
+  acct.hidden = !S.user;
+  if (S.user) acct.innerHTML = `<span class="acct-email" title="${esc(S.email)}">${esc(S.email)}</span><button type="button" class="btn ghost" id="sign-out">Sign out</button>`;
+  document.getElementById("sign-out")?.addEventListener("click", () => signOut(auth));
+
+  if (S.account === "loading") { app.innerHTML = `<p class="loading">Loading…</p>`; return; }
+  if (S.account !== "ready") { app.innerHTML = accountView(); bindAccount(); return; }
+  if (!Object.values(S.loaded).every(Boolean)) { app.innerHTML = `<p class="loading">Loading program data…</p>`; return; }
   app.innerHTML = S.role === "tutor" ? tutorView() : staffView();
   if (S.role === "tutor") bindTutor(); else bindStaff();
 }
 document.querySelectorAll(".role-switch button").forEach((b) => b.addEventListener("click", () => {
+  if (!S.isStaff) return;
   S.role = b.dataset.role; store.set("role", S.role); S.editId = ""; S.draft = null; render();
 }));
 
@@ -142,8 +154,8 @@ function tutorView() {
   if (!me) {
     return `
       <section class="stack">
-        <div><div class="eyebrow">Welcome</div><h1>Who's tutoring today?</h1>
-        <p class="muted">Pick your name to log sessions. This device will remember you.</p></div>
+        <div><div class="eyebrow">Staff · enter on a tutor's behalf</div><h1>Which tutor's sessions?</h1>
+        <p class="muted">Tutors sign in and see only their own students. As staff you can log or correct sessions for any tutor — for example from a paper form.</p></div>
         <div class="picker">
           ${tutors.map((t) => `<button type="button" data-pick="${esc(t.id)}">${esc(t.name)}<span>${pairsForTutor(t.id).length} student${pairsForTutor(t.id).length === 1 ? "" : "s"}</span></button>`).join("")
             || `<p class="empty">No tutors yet. Staff can add tutors under Staff → People.</p>`}
@@ -163,9 +175,9 @@ function tutorView() {
   return `
     <section class="hello">
       <div><div class="eyebrow">${esc(monthLabel(ym))}</div>
-        <h1>Hi, <em>${esc(me.name.split(" ")[0])}</em></h1>
+        <h1>${S.isStaff && me.id !== S.email ? `Logging for <em>${esc(me.name)}</em>` : `Hi, <em>${esc(me.name.split(" ")[0])}</em>`}</h1>
         <p class="muted" style="margin:4px 0 0">You've logged <b class="num">${fmtH(monthHours)} h</b> this month across ${active.length} active student${active.length === 1 ? "" : "s"}.</p></div>
-      <button type="button" class="btn ghost" id="switch-tutor">Not ${esc(me.name.split(" ")[0])}? Switch</button>
+      ${S.isStaff ? `<button type="button" class="btn ghost" id="switch-tutor">Choose another tutor</button>` : ""}
     </section>
 
     <div class="grid-2">
@@ -253,9 +265,9 @@ function checkDuplicate() {
 
 function bindTutor() {
   app.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => {
-    S.tutorId = b.dataset.pick; store.set("tutorId", S.tutorId); render();
+    S.tutorId = b.dataset.pick; render();
   }));
-  document.getElementById("switch-tutor")?.addEventListener("click", () => { S.tutorId = ""; store.set("tutorId", ""); S.draft = null; S.editId = ""; render(); });
+  document.getElementById("switch-tutor")?.addEventListener("click", () => { S.tutorId = ""; S.draft = null; S.editId = ""; render(); });
   document.getElementById("cancel-edit")?.addEventListener("click", () => { S.editId = ""; S.draft = null; render(); });
 
   const form = document.getElementById("log-form");
@@ -363,28 +375,112 @@ function openGoals(pairId) {
   dlg.showModal();
 }
 
-// ================= STAFF =================
-function staffView() {
-  if (!S.staffOk) {
+// ================= ACCOUNT =================
+const OFFICE = "the LVAEP office at info@lvaep.org or (973) 566-6200 x216";
+function authError(e) {
+  const code = e?.code || "";
+  if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") return "That email and password don't match. Check them, or use “Forgot password?”.";
+  if (code === "auth/email-already-in-use") return "There's already an account for this email. Sign in instead, or reset your password.";
+  if (code === "auth/weak-password") return "Choose a password of at least 8 characters.";
+  if (code === "auth/invalid-email") return "That doesn't look like an email address.";
+  if (code === "auth/too-many-requests") return "Too many attempts. Wait a few minutes, then try again.";
+  if (code === "auth/network-request-failed") return "No connection. Check your internet and try again.";
+  return "Something went wrong. Try again in a moment.";
+}
+
+function accountView() {
+  if (S.account === "unverified") {
     return `
-      <section class="card lift" style="max-width:420px">
-        <form id="gate" class="stack">
-          <div><div class="eyebrow">Staff only</div><h2>Program reports</h2>
-          <p class="small muted" style="margin:4px 0 0">Enter the staff passcode to see monthly reports and manage tutors.</p></div>
-          <label class="field">Passcode <input type="password" id="gate-code" autocomplete="off" required></label>
-          <button class="btn primary" type="submit">Open reports</button>
-          <p class="small muted" style="margin:0">Demo passcode: <span class="mono">lvaep2026</span></p>
-        </form>
+      <section class="card lift auth-card stack">
+        <div><div class="eyebrow">One more step</div><h2>Confirm your email</h2>
+        <p class="muted" style="margin:6px 0 0">We sent a link to <b>${esc(S.email)}</b>. Open it, then come back and continue. Can't find it? Check your spam folder.</p></div>
+        <button type="button" class="btn primary" id="verified">I've confirmed — continue</button>
+        <div class="row"><button type="button" class="btn ghost" id="resend">Send the link again</button></div>
       </section>`;
   }
+  if (S.account === "unregistered") {
+    return `
+      <section class="card lift auth-card stack">
+        <div><div class="eyebrow">Not on the list yet</div><h2>This email isn't registered</h2>
+        <p class="muted" style="margin:6px 0 0">You're signed in as <b>${esc(S.email)}</b>, but it isn't on LVAEP's tutor list. Ask ${OFFICE} to add this email, then sign in again. If you usually use a different email, sign out and use that one.</p></div>
+      </section>`;
+  }
+  const signup = S.authMode === "signup";
+  return `
+    <section class="auth-wrap">
+      <div class="stack" style="gap:8px">
+        <div class="eyebrow">Literacy Volunteers · Essex/Passaic</div>
+        <h1>Log your tutoring sessions in under a minute.</h1>
+        <p class="muted">Record each session as it happens. Monthly attendance and achievement reports are built automatically, so there are no paper forms to fill in at the end of the month.</p>
+      </div>
+      <section class="card lift stack">
+        <div class="seg" role="tablist">
+          <input type="radio" name="auth-mode" id="mode-signin" value="signin" ${signup ? "" : "checked"}><label for="mode-signin">Sign in</label>
+          <input type="radio" name="auth-mode" id="mode-signup" value="signup" ${signup ? "checked" : ""}><label for="mode-signup">First time here?</label>
+        </div>
+        <form id="auth-form" class="stack" novalidate>
+          ${signup ? `<p class="small muted" style="margin:0">Use the email you gave the LVAEP office. You'll choose a password, then confirm your email.</p>` : ""}
+          <label class="field">Email <input type="email" id="a-email" autocomplete="email" required value="${esc(store.get("lastEmail") || "")}"></label>
+          <label class="field">${signup ? "Choose a password" : "Password"} <input type="password" id="a-pass" autocomplete="${signup ? "new-password" : "current-password"}" minlength="8" required></label>
+          <div id="a-err" class="small" style="color:var(--bad)" role="alert" hidden></div>
+          <button type="submit" class="btn primary big">${signup ? "Create my account" : "Sign in"}</button>
+          ${signup ? "" : `<button type="button" class="btn ghost" id="forgot" style="justify-self:start">Forgot password?</button>`}
+        </form>
+      </section>
+    </section>`;
+}
+
+function bindAccount() {
+  document.querySelectorAll('input[name="auth-mode"]').forEach((r) => r.addEventListener("change", () => { S.authMode = r.value; render(); }));
+  const form = document.getElementById("auth-form");
+  const err = (msg) => { const el = document.getElementById("a-err"); el.textContent = msg; el.hidden = !msg; };
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("a-email").value.trim();
+    const pass = document.getElementById("a-pass").value;
+    if (!email || !pass) return err("Enter your email and password.");
+    if (S.authMode === "signup" && pass.length < 8) return err("Choose a password of at least 8 characters.");
+    store.set("lastEmail", email);
+    const btn = form.querySelector('button[type="submit"]'); btn.disabled = true; err("");
+    try {
+      if (S.authMode === "signup") {
+        const cred = await createUserWithEmailAndPassword(auth, email, pass);
+        await sendEmailVerification(cred.user, { url: location.origin });
+        toast("Account created — check your email for the confirmation link");
+      } else {
+        await signInWithEmailAndPassword(auth, email, pass);
+      }
+    } catch (x) { err(authError(x)); btn.disabled = false; }
+  });
+  document.getElementById("forgot")?.addEventListener("click", async () => {
+    const email = document.getElementById("a-email").value.trim();
+    if (!email) return err("Enter your email first, then choose “Forgot password?”.");
+    try { await sendPasswordResetEmail(auth, email, { url: location.origin }); err(""); toast(`If ${email} has an account, a reset link is on its way.`); }
+    catch (x) { err(authError(x)); }
+  });
+  document.getElementById("verified")?.addEventListener("click", async () => {
+    await auth.currentUser?.reload();
+    if (auth.currentUser?.emailVerified) {
+      await auth.currentUser.getIdToken(true); // refresh so the database sees the verified email
+      handleUser(auth.currentUser);
+    } else toast("Not confirmed yet — open the link in your email first.");
+  });
+  document.getElementById("resend")?.addEventListener("click", async () => {
+    try { await sendEmailVerification(auth.currentUser, { url: location.origin }); toast("Sent — check your inbox and spam folder"); }
+    catch (x) { toast(authError(x)); }
+  });
+}
+
+// ================= STAFF =================
+function staffView() {
   const demo = [...S.tutors.values()].some((t) => t.demo);
-  const tabs = [["report", "Monthly report"], ["form", "Student form"], ["people", "Tutors & students"]];
+  const tabs = [["report", "Monthly report"], ["form", "Student form"], ["people", "Tutors & students"], ["access", "Staff access"]];
   return `
     ${demo ? `<div class="banner no-print"><span><b>Example data is loaded</b> so you can see how reports look. Remove it before real use.</span><button type="button" class="btn" id="clear-demo">Remove example data</button></div>` : ""}
     <div class="tabs no-print" role="tablist">
       ${tabs.map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" aria-selected="${S.staffTab === k}">${l}</button>`).join("")}
     </div>
-    ${S.staffTab === "report" ? reportView() : S.staffTab === "form" ? formView() : peopleView()}`;
+    ${S.staffTab === "report" ? reportView() : S.staffTab === "form" ? formView() : S.staffTab === "access" ? accessView() : peopleView()}`;
 }
 
 function monthOptions(sel) {
@@ -563,10 +659,11 @@ function peopleView() {
         <h3>Tutors <span class="muted small">(${tutors.length})</span></h3>
         <form id="add-tutor" class="stack" style="gap:8px">
           <input type="text" id="t-name" placeholder="Full name" maxlength="80" required aria-label="Tutor name">
-          <input type="email" id="t-email" placeholder="Email (optional)" maxlength="120" aria-label="Tutor email">
+          <input type="email" id="t-email" placeholder="Email — they sign in with this" maxlength="120" required aria-label="Tutor email">
           <button class="btn primary" type="submit">Add tutor</button>
         </form>
-        <ul class="plist">${tutors.map((t) => `<li><span>${esc(t.name)}<small>${esc(t.email || "")}</small></span><button type="button" class="btn ghost danger" data-rm-tutor="${esc(t.id)}">Remove</button></li>`).join("")}</ul>
+        <p class="small muted" style="margin:0">After you add a tutor, send them the site link. They choose “First time here?” and set a password with this email.</p>
+        <ul class="plist">${tutors.map((t) => `<li><span>${esc(t.name)}<small>${esc(t.id)}</small></span><button type="button" class="btn ghost danger" data-rm-tutor="${esc(t.id)}">Remove</button></li>`).join("")}</ul>
       </div>
       <div class="card stack">
         <h3>Students <span class="muted small">(${students.length})</span></h3>
@@ -591,12 +688,29 @@ function peopleView() {
     </section>`;
 }
 
+function accessView() {
+  const staff = [...S.staff.values()].sort((a, b) => a.id.localeCompare(b.id));
+  return `
+    <section class="grid-2">
+      <div class="card stack">
+        <div><h3>Who has staff access</h3>
+        <p class="small muted" style="margin:4px 0 0">Staff see every tutor's sessions and all reports, and can manage tutors, students and this list. Tutors only ever see their own students.</p></div>
+        <ul class="plist">${staff.map((m) => `<li><span>${esc(m.name || m.id)}${m.id === S.email ? ` <span class="pill neutral">You</span>` : ""}<small>${esc(m.id)}</small></span>
+          ${m.id === S.email ? "" : `<button type="button" class="btn ghost danger" data-rm-staff="${esc(m.id)}">Remove</button>`}</li>`).join("")}</ul>
+      </div>
+      <div class="card stack">
+        <h3>Give someone staff access</h3>
+        <form id="add-staff" class="stack" style="gap:8px">
+          <input type="text" id="st-name" placeholder="Name" maxlength="80" aria-label="Staff name">
+          <input type="email" id="st-email" placeholder="Email they'll sign in with" maxlength="120" required aria-label="Staff email">
+          <button class="btn primary" type="submit">Give staff access</button>
+        </form>
+        <p class="small muted" style="margin:0">They sign in on this site with “First time here?” using that email, then confirm it.</p>
+      </div>
+    </section>`;
+}
+
 function bindStaff() {
-  document.getElementById("gate")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    if (document.getElementById("gate-code").value.trim() === STAFF_CODE) { S.staffOk = true; sessionSet("staffOk", "1"); render(); }
-    else toast("That passcode isn't right.");
-  });
   app.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => { S.staffTab = b.dataset.tab; store.set("staffTab", S.staffTab); render(); }));
   document.getElementById("month")?.addEventListener("change", (e) => { S.month = e.target.value; render(); });
   document.getElementById("csv")?.addEventListener("click", downloadCSV);
@@ -610,8 +724,11 @@ function bindStaff() {
 
   document.getElementById("add-tutor")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const name = document.getElementById("t-name").value.trim(); if (!name) return;
-    await safe(() => addDoc(collection(db, "tutors"), { name, email: document.getElementById("t-email").value.trim() }), `Added ${name}`);
+    const name = document.getElementById("t-name").value.trim();
+    const email = document.getElementById("t-email").value.trim().toLowerCase();
+    if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return toast("Enter the tutor's name and a valid email.");
+    if (S.tutors.has(email)) return toast("A tutor with that email already exists.");
+    await safe(() => setDoc(doc(db, "tutors", email), { name, email }), `Added ${name}`);
   });
   document.getElementById("add-student")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -624,7 +741,7 @@ function bindStaff() {
     if (!tutorId || !studentId) return toast("Choose both a tutor and a student.");
     if ([...S.pairs.values()].some((p) => p.tutorId === tutorId && p.studentId === studentId)) return toast("That tutor is already assigned to this student.");
     await safe(() => addDoc(collection(db, "pairs"), {
-      tutorId, studentId, site: document.getElementById("p-site").value.trim(), days: document.getElementById("p-days").value.trim(),
+      tutorId, studentId, studentName: studentName(studentId), site: document.getElementById("p-site").value.trim(), days: document.getElementById("p-days").value.trim(),
       times: document.getElementById("p-times").value.trim(), stopped: false, stoppedReason: "", goals: {}, createdDate: todayISO(),
     }), `Assigned ${studentName(studentId)} to ${tutorName(tutorId)}`);
   });
@@ -648,45 +765,19 @@ function bindStaff() {
       await deleteDoc(doc(db, "pairs", p.id));
     }, "Assignment removed");
   }));
+  document.getElementById("add-staff")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("st-email").value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return toast("Enter a valid email.");
+    if (S.staff.has(email)) return toast("That person already has staff access.");
+    await safe(() => setDoc(doc(db, "staff", email), { name: document.getElementById("st-name").value.trim(), addedBy: S.email, addedAt: serverTimestamp() }), `Staff access given to ${email}`);
+  });
+  app.querySelectorAll("[data-rm-staff]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.rmStaff;
+    if (confirm(`Remove staff access for ${id}?`)) await safe(() => deleteDoc(doc(db, "staff", id)), "Staff access removed");
+  }));
   app.querySelectorAll("[data-resume]").forEach((b) => b.addEventListener("click", () =>
     safe(() => updateDoc(doc(db, "pairs", b.dataset.resume), { stopped: false, stoppedReason: "", stoppedDate: "" }), "Tutoring resumed")));
-}
-
-// ---- Example data (first run only) ----
-async function seedIfEmpty() {
-  const meta = doc(db, "meta", "seed");
-  const m = await getDoc(meta);
-  if (m.exists()) return;
-  await setDoc(meta, { at: serverTimestamp() });
-  const wb = writeBatch(db);
-  const T = { dana: "Dana Whitfield", luis: "Luis Ortega", priya: "Priya Raman" };
-  const St = { maria: "Maria Santos", jean: "Jean-Baptiste Pierre", ahmed: "Ahmed Hassan", lucia: "Lucía Fernández" };
-  for (const [k, name] of Object.entries(T)) wb.set(doc(db, "tutors", "demo-" + k), { name, email: "", demo: true });
-  for (const [k, name] of Object.entries(St)) wb.set(doc(db, "students", "demo-" + k), { name, demo: true });
-  const P = [
-    { id: "demo-p1", tutorId: "demo-dana", studentId: "demo-maria", site: "Bloomfield Public Library", days: "Tue / Thu", times: "6:00–7:30 pm", wd: [2, 4], h: 1.5, goals: { A1: "2026-08-20", C5: "2026-09-10" } },
-    { id: "demo-p2", tutorId: "demo-dana", studentId: "demo-ahmed", site: "Montclair Public Library", days: "Sat", times: "10:00–11:30 am", wd: [6], h: 1.5, goals: {} },
-    { id: "demo-p3", tutorId: "demo-luis", studentId: "demo-jean", site: "Paterson Free Public Library", days: "Mon / Wed", times: "5:00–6:00 pm", wd: [1, 3], h: 1, goals: { D2: "2026-09-16" } },
-    { id: "demo-p4", tutorId: "demo-priya", studentId: "demo-lucia", site: "Bloomfield Public Library", days: "Fri", times: "3:00–5:00 pm", wd: [5], h: 2, goals: {}, stopUntil: "2026-08-31" },
-  ];
-  const end = todayISO();
-  let n = 0;
-  for (const p of P) {
-    wb.set(doc(db, "pairs", p.id), { tutorId: p.tutorId, studentId: p.studentId, site: p.site, days: p.days, times: p.times, goals: p.goals, stopped: false, stoppedReason: "", createdDate: "2026-07-01", demo: true });
-    for (let d = "2026-07-01"; d < end; d = addDays(d, 1)) {
-      const [y, m, dd] = d.split("-").map(Number);
-      if (!p.wd.includes(new Date(y, m - 1, dd).getDay())) continue;
-      if (p.stopUntil && d > p.stopUntil) continue;
-      n++;
-      let status = "held"; let h = p.h;
-      if (d === "2026-07-03" || d === "2026-09-07") status = "H";
-      else if (n % 11 === 0) status = "SA";
-      else if (n % 17 === 0) status = "TA";
-      else if (n % 5 === 0) h = p.h + 0.5;
-      wb.set(doc(collection(db, "sessions")), { pairId: p.id, tutorId: p.tutorId, studentId: p.studentId, date: d, hours: status === "held" ? h : 0, status, note: status === "held" && n % 3 === 0 ? "Reading practice and vocabulary review; homework assigned" : "", demo: true, createdAt: serverTimestamp() });
-    }
-  }
-  await wb.commit();
 }
 
 async function clearDemo() {
@@ -700,21 +791,61 @@ async function clearDemo() {
     ];
     for (let i = 0; i < refs.length; i += 400) { const wb = writeBatch(db); refs.slice(i, i + 400).forEach((r) => wb.delete(r)); await wb.commit(); }
   }, "Example data removed");
-  if (S.tutorId.startsWith("demo-")) { S.tutorId = ""; store.set("tutorId", ""); }
+  if (S.tutors.get(S.tutorId)?.demo) S.tutorId = "";
 }
 
-// ---- Live data ----
-function listen(name) {
-  onSnapshot(collection(db, name), (snap) => {
+// ---- Live data: staff load everything, tutors only their own assignments and sessions ----
+let unsubs = [];
+function stopListening() { unsubs.forEach((u) => u()); unsubs = []; }
+function listen(name, ref) {
+  S.loaded[name] = false;
+  unsubs.push(onSnapshot(ref, (snap) => {
     const m = new Map();
     snap.forEach((d) => m.set(d.id, { id: d.id, ...d.data() }));
     S[name] = m; S.loaded[name] = true;
     refresh();
   }, (err) => {
-    console.error(err);
-    app.innerHTML = `<p class="card">Couldn't reach the program database. Check your connection and reload the page.</p>`;
-  });
+    console.error(name, err);
+    app.innerHTML = `<p class="card">Couldn't load ${esc(name)}. Check your connection and reload the page.</p>`;
+  }));
 }
+function startListening() {
+  stopListening();
+  S.loaded = {};
+  ["tutors", "students", "pairs", "sessions", "staff"].forEach((n) => { S[n] = new Map(); });
+  if (S.isStaff) {
+    for (const n of ["tutors", "students", "pairs", "sessions", "staff"]) listen(n, collection(db, n));
+  } else {
+    listen("pairs", query(collection(db, "pairs"), where("tutorId", "==", S.email)));
+    listen("sessions", query(collection(db, "sessions"), where("tutorId", "==", S.email)));
+  }
+}
+
+async function handleUser(user) {
+  stopListening();
+  S.user = user; S.email = (user?.email || "").toLowerCase(); S.isStaff = false;
+  S.editId = ""; S.draft = null;
+  if (!user) { S.account = "signedOut"; return render(); }
+  if (!user.emailVerified) { S.account = "unverified"; return render(); }
+  S.account = "loading"; render();
+  try {
+    const [staffDoc, tutorDoc] = await Promise.all([getDoc(doc(db, "staff", S.email)), getDoc(doc(db, "tutors", S.email))]);
+    S.isStaff = staffDoc.exists();
+    if (!S.isStaff && !tutorDoc.exists()) { S.account = "unregistered"; return render(); }
+    if (tutorDoc.exists()) S.tutors = new Map([[S.email, { id: S.email, ...tutorDoc.data() }]]);
+    S.role = S.isStaff ? (store.get("role") || "staff") : "tutor";
+    S.tutorId = tutorDoc.exists() ? S.email : "";
+    S.account = "ready";
+    startListening();
+    if (!S.isStaff) { S.tutors = new Map([[S.email, { id: S.email, ...tutorDoc.data() }]]); S.loaded.tutors = true; }
+    render();
+  } catch (e) {
+    console.error(e);
+    app.innerHTML = `<p class="card">Couldn't check your account. Reload the page to try again.</p>`;
+  }
+}
+onAuthStateChanged(auth, handleUser);
+
 // Live updates from other devices: never re-render under someone's cursor or an open dialog.
 let pending = false;
 function isTyping() { const a = document.activeElement; return !!a && app.contains(a) && ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName); }
@@ -727,7 +858,4 @@ function refresh() {
 app.addEventListener("focusout", () => setTimeout(() => { if (pending) refresh(); }, 0));
 document.getElementById("goals-dialog").addEventListener("close", () => { pending = false; refresh(); });
 
-seedIfEmpty().catch((e) => console.error("seed", e)).finally(() => {
-  ["tutors", "students", "pairs", "sessions"].forEach(listen);
-});
 render();
