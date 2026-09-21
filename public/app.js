@@ -91,7 +91,9 @@ function tutorName(id) { return S.tutors.get(id)?.name || "Unknown tutor"; }
 function studentName(id) { return S.students.get(id)?.name || "Unknown student"; }
 function pairLabel(p) { return `${tutorName(p.tutorId)} → ${studentName(p.studentId)}`; }
 function pairsForTutor(tid) { return [...S.pairs.values()].filter((p) => p.tutorId === tid).sort((a, b) => studentName(a.studentId).localeCompare(studentName(b.studentId))); }
-function sessionsFor(pred) { return [...S.sessions.values()].filter(pred).sort((a, b) => b.date.localeCompare(a.date)); }
+// Newest first; within a day, most recently entered first (a pending write has no timestamp yet, so it counts as newest).
+function entered(s) { return s.createdAt?.toMillis?.() ?? Infinity; }
+function sessionsFor(pred) { return [...S.sessions.values()].filter(pred).sort((a, b) => b.date.localeCompare(a.date) || entered(b) - entered(a)); }
 
 let toastTimer;
 function toast(msg) {
