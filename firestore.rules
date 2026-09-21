@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function str(v, max) { return v is string && v.size() <= max; }
+
+    match /tutors/{id} {
+      allow read, delete: if true;
+      allow create, update: if str(request.resource.data.name, 80) && request.resource.data.name.size() > 0;
+    }
+    match /students/{id} {
+      allow read, delete: if true;
+      allow create, update: if str(request.resource.data.name, 80) && request.resource.data.name.size() > 0;
+    }
+    match /pairs/{id} {
+      allow read, delete: if true;
+      allow create, update: if request.resource.data.tutorId is string && request.resource.data.studentId is string
+        && request.resource.data.size() < 30;
+    }
+    match /sessions/{id} {
+      allow read, delete: if true;
+      allow create, update: if request.resource.data.pairId is string
+        && request.resource.data.date is string && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.hours is number && request.resource.data.hours >= 0 && request.resource.data.hours <= 12
+        && request.resource.data.status in ['held', 'SA', 'TA', 'H']
+        && (!('note' in request.resource.data) || str(request.resource.data.note, 500));
+    }
+    match /meta/{id} { allow read, write: if true; }
+  }
+}
