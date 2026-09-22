@@ -6,6 +6,7 @@ import {
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   sendEmailVerification, sendPasswordResetEmail, signOut,
+  GoogleAuthProvider, signInWithPopup, signInWithRedirect,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const fb = initializeApp({
@@ -385,6 +386,9 @@ function authError(e) {
   if (code === "auth/invalid-email") return "That doesn't look like an email address.";
   if (code === "auth/too-many-requests") return "Too many attempts. Wait a few minutes, then try again.";
   if (code === "auth/network-request-failed") return "No connection. Check your internet and try again.";
+  if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") return "";
+  if (code === "auth/operation-not-allowed") return "Google sign-in isn't switched on for this site yet. Use an email and password, or ask the office to enable it.";
+  if (code === "auth/account-exists-with-different-credential") return "This email already has a password account here. Sign in with the password instead.";
   return "Something went wrong. Try again in a moment.";
 }
 
@@ -396,6 +400,7 @@ function accountView() {
         <p class="muted" style="margin:6px 0 0">We sent a link to <b>${esc(S.email)}</b>. Open it, then come back and continue. Can't find it? Check your spam folder.</p></div>
         <button type="button" class="btn primary" id="verified">I've confirmed — continue</button>
         <div class="row"><button type="button" class="btn ghost" id="resend">Send the link again</button></div>
+        <p class="small muted" style="margin:0">If the link says it's invalid or expired, some mail systems open links before you do, which uses them up. Sign out and choose <b>Continue with Google</b> instead — it needs no confirmation email.</p>
       </section>`;
   }
   if (S.account === "unregistered") {
@@ -414,6 +419,11 @@ function accountView() {
         <p class="muted">Record each session as it happens. Monthly attendance and achievement reports are built automatically, so there are no paper forms to fill in at the end of the month.</p>
       </div>
       <section class="card lift stack">
+        <button type="button" class="btn big google" id="google">
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#4285F4" d="M45 24c0-1.6-.1-2.7-.4-3.9H24v7.1h12c-.2 1.8-1.5 4.6-4.4 6.4l6.7 5.2c4-3.7 6.7-9.1 6.7-14.8z"/><path fill="#34A853" d="M24 46c5.9 0 10.8-1.9 14.4-5.2l-6.9-5.3c-1.8 1.3-4.3 2.2-7.5 2.2-5.7 0-10.6-3.8-12.3-9.1l-7.1 5.5C8.2 41.1 15.5 46 24 46z"/><path fill="#FBBC05" d="M11.7 28.6c-.5-1.3-.7-2.7-.7-4.1s.3-2.8.7-4.1l-7.1-5.6C3.2 17.6 2.5 20.7 2.5 24s.7 6.4 2.1 9.2l7.1-4.6z"/><path fill="#EA4335" d="M24 9.5c4 0 6.8 1.7 8.4 3.2l6.1-6C34.8 3.4 29.9 1 24 1 15.5 1 8.2 5.9 4.6 13l7.1 5.6C13.4 13.3 18.3 9.5 24 9.5z"/></svg>
+          Continue with Google
+        </button>
+        <div class="or"><span>or use a password</span></div>
         <div class="seg" role="tablist">
           <input type="radio" name="auth-mode" id="mode-signin" value="signin" ${signup ? "" : "checked"}><label for="mode-signin">Sign in</label>
           <input type="radio" name="auth-mode" id="mode-signup" value="signup" ${signup ? "checked" : ""}><label for="mode-signup">First time here?</label>
@@ -431,6 +441,15 @@ function accountView() {
 }
 
 function bindAccount() {
+  document.getElementById("google")?.addEventListener("click", async () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    try { await signInWithPopup(auth, provider); }
+    catch (x) {
+      if (x?.code === "auth/popup-blocked") { try { await signInWithRedirect(auth, provider); return; } catch { /* fall through */ } }
+      const msg = authError(x); if (msg) { const el = document.getElementById("a-err"); if (el) { el.textContent = msg; el.hidden = false; } else toast(msg); }
+    }
+  });
   document.querySelectorAll('input[name="auth-mode"]').forEach((r) => r.addEventListener("change", () => { S.authMode = r.value; render(); }));
   const form = document.getElementById("auth-form");
   const err = (msg) => { const el = document.getElementById("a-err"); el.textContent = msg; el.hidden = !msg; };
