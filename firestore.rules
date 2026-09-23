@@ -19,22 +19,27 @@ service cloud.firestore {
     match /tutors/{email} {
       allow get: if signedIn() && (email == me() || isStaff());
       allow list, delete: if isStaff();
-      allow create, update: if isStaff() && email == email.lower() && named(request.resource.data);
+      // Tutors sign themselves up: anyone signed in may create/update their OWN tutor record.
+      allow create, update: if email == email.lower() && named(request.resource.data)
+        && (isStaff() || (signedIn() && email == me()));
     }
 
-    // Student records are staff-only; tutors see names via their assignments.
+    // Students a tutor adds themselves stay visible to that tutor and to staff.
     match /students/{id} {
-      allow read, delete: if isStaff();
-      allow create, update: if isStaff() && named(request.resource.data);
+      allow read, delete: if isStaff() || (signedIn() && resource.data.createdBy == me());
+      allow create: if named(request.resource.data)
+        && (isStaff() || (signedIn() && request.resource.data.createdBy == me()));
+      allow update: if named(request.resource.data)
+        && (isStaff() || (signedIn() && resource.data.createdBy == me() && request.resource.data.createdBy == me()));
     }
 
     // Tutor–student assignments. Tutors may only record goals / stopped status on their own.
     match /pairs/{id} {
       allow read: if isStaff() || (signedIn() && resource.data.tutorId == me());
-      allow create, delete: if isStaff();
+      allow create: if isStaff() || (signedIn() && request.resource.data.tutorId == me());
+      allow delete: if isStaff() || (signedIn() && resource.data.tutorId == me());
       allow update: if isStaff() || (signedIn() && resource.data.tutorId == me()
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['goals', 'otherGoal', 'otherGoalDate', 'stopped', 'stoppedReason', 'stoppedDate']));
+        && request.resource.data.tutorId == me());
     }
 
     function validSession(d) {

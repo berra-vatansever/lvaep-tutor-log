@@ -210,13 +210,17 @@ function tutorView() {
             <textarea id="f-note" maxlength="500" placeholder="e.g. Reviewed job application vocabulary; assigned reading ch. 3">${esc(d.note)}</textarea></label>
           <div id="f-warn" class="small" style="color:var(--warn)" hidden></div>
           <div class="row"><button type="submit" class="btn primary big">${editing ? "Save changes" : "Save session"}</button></div>
-          ` : `<p class="empty">You have no active students assigned. Contact the office at (973) 566-6200 x216.</p>`}
+          ` : `<p class="empty">${me.id === S.email ? "Add a student first — use “Add a student” on the right — then you can log sessions." : "This tutor has no active students assigned."}</p>`}
         </form>
       </section>
 
       <section class="stack">
-        <h2>My students</h2>
+        <div class="row spread"><h2>My students</h2>
+          ${me.id === S.email ? `<button type="button" class="btn" id="add-own-student">Add a student</button>` : ""}</div>
         <div class="students">
+          ${!pairs.length && me.id === S.email ? `<div class="card stack" style="gap:10px"><b>No students yet</b>
+            <p class="small muted" style="margin:0">Add the first student you tutor — just their name and when you meet. You can add more any time.</p>
+            <div><button type="button" class="btn primary" id="add-own-student-2">Add my first student</button></div></div>` : ""}
           ${pairs.map((p) => { const st = monthStats(p.id, ym); return `
             <div class="student ${p.stopped ? "stopped" : ""}">
               <div><div class="name">${esc(studentName(p.studentId))} ${p.stopped ? `<span class="pill bad">Stopped</span>` : ""}</div>
@@ -325,6 +329,47 @@ function bindTutor() {
     await safe(() => deleteDoc(doc(db, "sessions", s.id)), "Session deleted");
   }));
   app.querySelectorAll("[data-goals]").forEach((b) => b.addEventListener("click", () => openGoals(b.dataset.goals)));
+  document.getElementById("add-own-student")?.addEventListener("click", openAddStudent);
+  document.getElementById("add-own-student-2")?.addEventListener("click", openAddStudent);
+}
+
+// ---- A tutor adds one of their own students ----
+function openAddStudent() {
+  const dlg = document.getElementById("goals-dialog");
+  dlg.innerHTML = `
+    <form id="new-student" class="stack" style="padding:22px">
+      <div><div class="eyebrow">New student</div><h2>Who are you tutoring?</h2>
+      <p class="small muted" style="margin:4px 0 0">Only you and LVAEP staff can see this student.</p></div>
+      <label class="field">Student's name <input type="text" id="ns-name" maxlength="80" required></label>
+      <label class="field">Tutoring site <input type="text" id="ns-site" maxlength="100" placeholder="e.g. Bloomfield Public Library"></label>
+      <div class="fields">
+        <label class="field">Day(s) <input type="text" id="ns-days" maxlength="60" placeholder="Tue / Thu"></label>
+        <label class="field">Time(s) <input type="text" id="ns-times" maxlength="60" placeholder="6–7:30 pm"></label>
+      </div>
+      <div id="ns-err" class="small" style="color:var(--bad)" role="alert" hidden></div>
+      <div class="row" style="justify-content:flex-end">
+        <button type="button" class="btn ghost" id="ns-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Add student</button>
+      </div>
+    </form>`;
+  dlg.querySelector("#ns-cancel").addEventListener("click", () => dlg.close());
+  dlg.querySelector("#new-student").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = dlg.querySelector("#ns-name").value.trim();
+    const err = dlg.querySelector("#ns-err");
+    if (name.length < 2) { err.textContent = "Enter the student's name."; err.hidden = false; return; }
+    const btn = e.target.querySelector('button[type="submit"]'); btn.disabled = true; err.hidden = true;
+    try {
+      const student = await addDoc(collection(db, "students"), { name, createdBy: S.email });
+      await addDoc(collection(db, "pairs"), {
+        tutorId: S.email, studentId: student.id, studentName: name,
+        site: dlg.querySelector("#ns-site").value.trim(), days: dlg.querySelector("#ns-days").value.trim(),
+        times: dlg.querySelector("#ns-times").value.trim(), stopped: false, stoppedReason: "", goals: {}, createdDate: todayISO(),
+      });
+      dlg.close(); toast(`${name} added — you can log sessions now`);
+    } catch (x) { console.error(x); err.textContent = "Couldn't add the student. Check your connection and try again."; err.hidden = false; btn.disabled = false; }
+  });
+  dlg.showModal();
 }
 
 // ---- Goals & status dialog (achievements + STOPPED) ----
@@ -406,8 +451,14 @@ function accountView() {
   if (S.account === "unregistered") {
     return `
       <section class="card lift auth-card stack">
-        <div><div class="eyebrow">Not on the list yet</div><h2>This email isn't registered</h2>
-        <p class="muted" style="margin:6px 0 0">You're signed in as <b>${esc(S.email)}</b>, but it isn't on LVAEP's tutor list. Ask ${OFFICE} to add this email, then sign in again. If you usually use a different email, sign out and use that one.</p></div>
+        <div><div class="eyebrow">Welcome to LVAEP</div><h2>Set up your tutor account</h2>
+        <p class="muted" style="margin:6px 0 0">You're signed in as <b>${esc(S.email)}</b>. Tell us your name and you can start logging sessions — you'll add your students on the next screen.</p></div>
+        <form id="profile-form" class="stack">
+          <label class="field">Your full name <input type="text" id="p-name" maxlength="80" autocomplete="name" required></label>
+          <div id="p-err" class="small" style="color:var(--bad)" role="alert" hidden></div>
+          <button type="submit" class="btn primary big">Start tutoring</button>
+        </form>
+        <p class="small muted" style="margin:0">Office staff: ask someone who already has staff access to add you under Staff access, or contact ${OFFICE}.</p>
       </section>`;
   }
   const signup = S.authMode === "signup";
@@ -441,6 +492,18 @@ function accountView() {
 }
 
 function bindAccount() {
+  document.getElementById("profile-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("p-name").value.trim();
+    const el = document.getElementById("p-err");
+    if (name.length < 2) { el.textContent = "Enter your full name."; el.hidden = false; return; }
+    const btn = e.target.querySelector('button[type="submit"]'); btn.disabled = true; el.hidden = true;
+    try {
+      await setDoc(doc(db, "tutors", S.email), { name, email: S.email, selfSignup: true, createdDate: todayISO() });
+      await handleUser(auth.currentUser);
+      toast(`Welcome, ${name.split(" ")[0]} — add your first student to get started`);
+    } catch (x) { console.error(x); el.textContent = "Couldn't create your account. Check your connection and try again."; el.hidden = false; btn.disabled = false; }
+  });
   document.getElementById("google")?.addEventListener("click", async () => {
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
