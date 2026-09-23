@@ -62,6 +62,7 @@ const S = {
   fy: fyStart(todayISO()),
   editId: "",
   draft: null,
+  loadError: null,
 };
 
 // ---- Utilities ----
@@ -139,6 +140,16 @@ function render() {
 
   if (S.account === "loading") { app.innerHTML = `<p class="loading">Loading…</p>`; return; }
   if (S.account !== "ready") { app.innerHTML = accountView(); bindAccount(); return; }
+  if (S.loadError) {
+    app.innerHTML = `<section class="card stack" style="max-width:520px">
+      <h2>Couldn't load your ${esc(S.loadError.name)}</h2>
+      <p class="muted" style="margin:0">${S.loadError.code === "permission-denied"
+        ? "Your account doesn't have access to this data. If you just unlocked staff access, sign out and back in. Otherwise contact " + OFFICE + "."
+        : "Check your connection and try again."}</p>
+      <div class="row"><button type="button" class="btn primary" id="retry">Try again</button></div></section>`;
+    document.getElementById("retry").addEventListener("click", () => { S.loadError = null; startListening(); render(); });
+    return;
+  }
   if (!Object.values(S.loaded).every(Boolean)) { app.innerHTML = `<p class="loading">Loading program data…</p>`; return; }
   app.innerHTML = S.role === "tutor" ? tutorView() : staffView();
   if (S.role === "tutor") bindTutor(); else bindStaff();
@@ -931,12 +942,13 @@ function listen(name, ref) {
     refresh();
   }, (err) => {
     console.error(name, err);
-    app.innerHTML = `<p class="card">Couldn't load ${esc(name)}. Check your connection and reload the page.</p>`;
+    S.loadError = { name, code: err?.code || "unknown" };
+    render();
   }));
 }
 function startListening() {
   stopListening();
-  S.loaded = {};
+  S.loaded = {}; S.loadError = null;
   ["tutors", "students", "pairs", "sessions", "staff"].forEach((n) => { S[n] = new Map(); });
   if (S.isStaff) {
     for (const n of ["tutors", "students", "pairs", "sessions", "staff"]) listen(n, collection(db, n));
