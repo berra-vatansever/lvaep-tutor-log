@@ -11,7 +11,13 @@ service cloud.firestore {
     // Staff accounts, keyed by lowercase email.
     match /staff/{email} {
       allow get: if signedIn() && (email == me() || isStaff());
-      allow list, create, update: if isStaff() && email == email.lower();
+      allow list, update: if isStaff() && email == email.lower();
+      // Staff access is granted either by an existing staff member, or by someone
+      // signing in and entering the staff code (checked here, never trusted from the page).
+      allow create: if email == email.lower()
+        && (isStaff() || (signedIn() && email == me()
+            && hashing.sha256(request.resource.data.code).toHexString().lower()
+               == 'b62c3450123951b27307ffb5aa07dd12cdbd67aa6d2325e5b84e03fc872271f5'));
       allow delete: if isStaff() && email != me();
     }
 

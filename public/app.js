@@ -1,7 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc,
-  getDoc, writeBatch, serverTimestamp, query, where,
+  getDoc, writeBatch, serverTimestamp, query, where, deleteField,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -178,7 +178,8 @@ function tutorView() {
       <div><div class="eyebrow">${esc(monthLabel(ym))}</div>
         <h1>${S.isStaff && me.id !== S.email ? `Logging for <em>${esc(me.name)}</em>` : `Hi, <em>${esc(me.name.split(" ")[0])}</em>`}</h1>
         <p class="muted" style="margin:4px 0 0">You've logged <b class="num">${fmtH(monthHours)} h</b> this month across ${active.length} active student${active.length === 1 ? "" : "s"}.</p></div>
-      ${S.isStaff ? `<button type="button" class="btn ghost" id="switch-tutor">Choose another tutor</button>` : ""}
+      ${S.isStaff ? `<button type="button" class="btn ghost" id="switch-tutor">Choose another tutor</button>`
+        : `<button type="button" class="btn ghost" id="claim-staff">I'm staff — enter staff code</button>`}
     </section>
 
     <div class="grid-2">
@@ -330,7 +331,47 @@ function bindTutor() {
   }));
   app.querySelectorAll("[data-goals]").forEach((b) => b.addEventListener("click", () => openGoals(b.dataset.goals)));
   document.getElementById("add-own-student")?.addEventListener("click", openAddStudent);
+  document.getElementById("claim-staff")?.addEventListener("click", openStaffCode);
   document.getElementById("add-own-student-2")?.addEventListener("click", openAddStudent);
+}
+
+// ---- Staff code: a second way to get staff access, checked by the database rules ----
+function openStaffCode() {
+  const dlg = document.getElementById("goals-dialog");
+  dlg.innerHTML = `
+    <form id="staff-code" class="stack" style="padding:22px">
+      <div><div class="eyebrow">Staff access</div><h2>Enter the staff code</h2>
+      <p class="small muted" style="margin:4px 0 0">Staff see every tutor's sessions and all monthly reports. The code comes from the LVAEP office.</p></div>
+      <label class="field">Your name <input type="text" id="sc-name" maxlength="80" autocomplete="name" value="${esc(S.tutors.get(S.email)?.name || "")}" required></label>
+      <label class="field">Staff code <input type="password" id="sc-code" autocomplete="off" required></label>
+      <div id="sc-err" class="small" style="color:var(--bad)" role="alert" hidden></div>
+      <div class="row" style="justify-content:flex-end">
+        <button type="button" class="btn ghost" id="sc-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Unlock staff access</button>
+      </div>
+    </form>`;
+  dlg.querySelector("#sc-cancel").addEventListener("click", () => dlg.close());
+  dlg.querySelector("#staff-code").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = dlg.querySelector("#sc-err");
+    const name = dlg.querySelector("#sc-name").value.trim();
+    const code = dlg.querySelector("#sc-code").value;
+    if (!name || !code) { err.textContent = "Enter your name and the staff code."; err.hidden = false; return; }
+    const btn = e.target.querySelector('button[type="submit"]'); btn.disabled = true; err.hidden = true;
+    try {
+      const ref = doc(db, "staff", S.email);
+      await setDoc(ref, { name, code, addedAt: serverTimestamp() });
+      await updateDoc(ref, { code: deleteField() }); // the code itself is never kept
+      dlg.close();
+      await handleUser(auth.currentUser);
+      toast("Staff access unlocked");
+    } catch (x) {
+      console.error(x);
+      err.textContent = "That code isn't right. Check it with the office and try again.";
+      err.hidden = false; btn.disabled = false;
+    }
+  });
+  dlg.showModal();
 }
 
 // ---- A tutor adds one of their own students ----
@@ -458,7 +499,8 @@ function accountView() {
           <div id="p-err" class="small" style="color:var(--bad)" role="alert" hidden></div>
           <button type="submit" class="btn primary big">Start tutoring</button>
         </form>
-        <p class="small muted" style="margin:0">Office staff: ask someone who already has staff access to add you under Staff access, or contact ${OFFICE}.</p>
+        <div class="or"><span>or</span></div>
+        <button type="button" class="btn" id="claim-staff">I'm LVAEP staff — enter staff code</button>
       </section>`;
   }
   const signup = S.authMode === "signup";
@@ -492,6 +534,7 @@ function accountView() {
 }
 
 function bindAccount() {
+  document.getElementById("claim-staff")?.addEventListener("click", openStaffCode);
   document.getElementById("profile-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = document.getElementById("p-name").value.trim();
